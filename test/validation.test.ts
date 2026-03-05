@@ -31,5 +31,20 @@ describe("parsePayload", () => {
     });
     expect(parsed.ok).toBe(false);
   });
-});
 
+  it("rejects invalid recipient email", () => {
+    const parsed = parsePayload({
+      ...validPayload,
+      to: ["not-an-email"],
+    });
+    expect(parsed.ok).toBe(false);
+  });
+
+  it("rejects invalid from address", () => {
+    const parsed = parsePayload({
+      ...validPayload,
+      from: "invalid-from-value",
+    });
+    expect(parsed.ok).toBe(false);
+  });
+});

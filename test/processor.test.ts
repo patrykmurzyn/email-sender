@@ -3,8 +3,7 @@ import { processQueueMessage } from "../src/processor";
 import type { AppConfig, DeliveryClient, EventInsert, EventRepository } from "../src/types";
 
 const config: AppConfig = {
-  dailySoftLimit: 95,
-  dailyHardLimit: 100,
+  dailyLimit: 95,
   rateLimitDelayMs: 0,
   rateLimitRetrySeconds: 3600,
   retry429MinSeconds: 60,
@@ -35,7 +34,7 @@ function deps(overrides: Partial<{ sent: boolean; sent24h: number; delivery: Del
   const events: EventInsert[] = [];
   const repository: EventRepository = {
     hasSentMessage: vi.fn(async () => overrides.sent ?? false),
-    countSentLast24Hours: vi.fn(async () => overrides.sent24h ?? 0),
+    countSentToday: vi.fn(async () => overrides.sent24h ?? 0),
     insertEvent: vi.fn(async (event) => {
       events.push(event);
     }),
@@ -68,7 +67,6 @@ describe("processQueueMessage", () => {
       deliveryClient: testDeps.deliveryClient,
       hashContent: async () => ({ hash: "abc", size: 1 }),
       sleep: async () => undefined,
-      nowIso: () => "2026-03-05T00:00:00.000Z",
       logger: console,
     });
 
@@ -87,7 +85,6 @@ describe("processQueueMessage", () => {
       deliveryClient: testDeps.deliveryClient,
       hashContent: async () => ({ hash: "abc", size: 1 }),
       sleep: async () => undefined,
-      nowIso: () => "2026-03-05T00:00:00.000Z",
       logger: console,
     });
 
@@ -114,7 +111,6 @@ describe("processQueueMessage", () => {
       deliveryClient: testDeps.deliveryClient,
       hashContent: async () => ({ hash: "abc", size: 1 }),
       sleep: async () => undefined,
-      nowIso: () => "2026-03-05T00:00:00.000Z",
       logger: console,
     });
 
@@ -133,7 +129,6 @@ describe("processQueueMessage", () => {
       deliveryClient: testDeps.deliveryClient,
       hashContent: async () => ({ hash: "abc", size: 1 }),
       sleep: async () => undefined,
-      nowIso: () => "2026-03-05T00:00:00.000Z",
       logger: console,
     });
 
@@ -141,5 +136,30 @@ describe("processQueueMessage", () => {
     expect(msg.retry).not.toHaveBeenCalled();
     expect(testDeps.events.some((event) => event.status === "invalid_payload")).toBe(true);
   });
-});
 
+  it("retries when provider send succeeds but sent event cannot be persisted", async () => {
+    const msg = message(basePayload);
+    const testDeps = deps();
+    const insertEventMock = testDeps.repository.insertEvent as ReturnType<typeof vi.fn>;
+    let callIndex = 0;
+    insertEventMock.mockImplementation(async (event: EventInsert) => {
+      callIndex += 1;
+      if (event.status === "sent" && callIndex >= 2) {
+        throw new Error("DB write failed");
+      }
+      testDeps.events.push(event);
+    });
+
+    await processQueueMessage(msg, {
+      config,
+      repository: testDeps.repository,
+      deliveryClient: testDeps.deliveryClient,
+      hashContent: async () => ({ hash: "abc", size: 1 }),
+      sleep: async () => undefined,
+      logger: console,
+    });
+
+    expect(msg.ack).not.toHaveBeenCalled();
+    expect(msg.retry).toHaveBeenCalledWith({ delaySeconds: 60 });
+  });
+});

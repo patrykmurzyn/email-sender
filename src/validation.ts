@@ -1,7 +1,27 @@
 import { z } from "zod";
 import type { EmailQueueMessage } from "./types";
 
-const emailLikeField = z.string().min(1).max(320);
+const recipientEmailField = z.string().email().max(320);
+
+function extractAddressEmail(value: string): string {
+  const match = value.match(/<([^<>]+)>/);
+  return (match?.[1] ?? value).trim();
+}
+
+function isValidFromAddress(value: string): boolean {
+  const emailPart = extractAddressEmail(value);
+  return z.string().email().safeParse(emailPart).success;
+}
+
+function metadataWithinLimit(value: unknown): boolean {
+  try {
+    const serialized = JSON.stringify(value);
+    if (!serialized) return true;
+    return new TextEncoder().encode(serialized).byteLength <= 8192;
+  } catch {
+    return false;
+  }
+}
 
 const tagSchema = z.object({
   name: z.string().min(1),
@@ -11,16 +31,20 @@ const tagSchema = z.object({
 const payloadSchema = z
   .object({
     messageId: z.string().uuid(),
-    from: z.string().min(1),
-    to: z.array(emailLikeField).min(1),
-    cc: z.array(emailLikeField).optional(),
-    bcc: z.array(emailLikeField).optional(),
-    replyTo: emailLikeField.optional(),
+    from: z.string().min(1).max(512).refine(isValidFromAddress, {
+      message: "from must contain a valid email address",
+    }),
+    to: z.array(recipientEmailField).min(1).max(50),
+    cc: z.array(recipientEmailField).max(50).optional(),
+    bcc: z.array(recipientEmailField).max(50).optional(),
+    replyTo: recipientEmailField.optional(),
     subject: z.string().min(1).max(998),
     html: z.string().min(1).optional(),
     text: z.string().min(1).optional(),
     tags: z.array(tagSchema).optional(),
-    metadata: z.record(z.unknown()).optional(),
+    metadata: z.record(z.unknown()).optional().refine(metadataWithinLimit, {
+      message: "metadata is too large (max 8KB serialized)",
+    }),
   })
   .strict()
   .refine((value) => Boolean(value.html || value.text), {
@@ -55,4 +79,3 @@ export function parsePayload(body: unknown): {
   }
   return { ok: true, payload: parsed.data };
 }
-

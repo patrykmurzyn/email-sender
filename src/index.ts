@@ -22,7 +22,6 @@ export default {
         deliveryClient,
         hashContent: hashPayloadContent,
         sleep,
-        nowIso: () => new Date().toISOString(),
         logger: console,
       });
     }

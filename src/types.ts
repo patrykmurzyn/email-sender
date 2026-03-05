@@ -32,8 +32,7 @@ export interface Env {
   RESEND_API_KEY: string;
   TURSO_DATABASE_URL: string;
   TURSO_AUTH_TOKEN: string;
-  DAILY_SOFT_LIMIT?: string;
-  DAILY_HARD_LIMIT?: string;
+  DAILY_LIMIT?: string;
   RATE_LIMIT_DELAY_MS?: string;
   RATE_LIMIT_RETRY_SECONDS?: string;
   RETRY_429_MIN_SECONDS?: string;
@@ -44,8 +43,7 @@ export interface Env {
 }
 
 export interface AppConfig {
-  dailySoftLimit: number;
-  dailyHardLimit: number;
+  dailyLimit: number | null;
   rateLimitDelayMs: number;
   rateLimitRetrySeconds: number;
   retry429MinSeconds: number;
@@ -77,7 +75,7 @@ export interface EventInsert {
 
 export interface EventRepository {
   hasSentMessage(messageId: string): Promise<boolean>;
-  countSentLast24Hours(): Promise<number>;
+  countSentToday(): Promise<number>;
   insertEvent(event: EventInsert): Promise<void>;
 }
 
@@ -101,7 +99,6 @@ export interface ProcessorDeps {
   deliveryClient: DeliveryClient;
   sleep: (ms: number) => Promise<void>;
   hashContent: (payload: EmailQueueMessage) => Promise<{ hash: string; size: number }>;
-  nowIso: () => string;
   logger: Pick<Console, "error" | "info" | "warn">;
 }
 
@@ -113,4 +110,3 @@ export interface LibsqlEnv {
 export interface RepositoryOptions {
   client?: Client;
 }
-

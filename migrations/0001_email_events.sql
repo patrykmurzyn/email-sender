@@ -51,9 +51,8 @@ ON email_events(message_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_email_events_status_created_at
 ON email_events(status, created_at DESC);
 
-CREATE VIEW IF NOT EXISTS v_sent_last_24h AS
-SELECT COUNT(*) AS sent_count_24h
+CREATE VIEW IF NOT EXISTS v_sent_today AS
+SELECT COUNT(*) AS sent_count_today
 FROM email_events
 WHERE status = 'sent'
-  AND sent_at >= datetime('now', '-24 hours');
-
+  AND date(sent_at) = date('now');

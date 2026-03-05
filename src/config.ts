@@ -7,6 +7,15 @@ function parsePositiveInt(value: string | undefined, fallback: number): number {
   return parsed;
 }
 
+function parseOptionalPositiveInt(value: string | undefined): number | null {
+  if (value === undefined || value.trim() === "") return null;
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    throw new Error("DAILY_LIMIT must be a positive integer when provided");
+  }
+  return parsed;
+}
+
 function assertSecret(name: keyof Env, value: string | undefined): string {
   if (!value) {
     throw new Error(`Missing required secret: ${name}`);
@@ -19,12 +28,8 @@ export function getConfig(env: Env): AppConfig {
   assertSecret("TURSO_DATABASE_URL", env.TURSO_DATABASE_URL);
   assertSecret("TURSO_AUTH_TOKEN", env.TURSO_AUTH_TOKEN);
 
-  const dailySoftLimit = parsePositiveInt(env.DAILY_SOFT_LIMIT, 95);
-  const dailyHardLimit = parsePositiveInt(env.DAILY_HARD_LIMIT, 100);
-
   return {
-    dailySoftLimit,
-    dailyHardLimit,
+    dailyLimit: parseOptionalPositiveInt(env.DAILY_LIMIT),
     rateLimitDelayMs: parsePositiveInt(env.RATE_LIMIT_DELAY_MS, 1000),
     rateLimitRetrySeconds: parsePositiveInt(env.RATE_LIMIT_RETRY_SECONDS, 3600),
     retry429MinSeconds: parsePositiveInt(env.RETRY_429_MIN_SECONDS, 60),
@@ -34,4 +39,3 @@ export function getConfig(env: Env): AppConfig {
     resendTimeoutMs: parsePositiveInt(env.RESEND_TIMEOUT_MS, 15000),
   };
 }
-

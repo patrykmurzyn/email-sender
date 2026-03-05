@@ -31,9 +31,9 @@ export class LibsqlEventRepository implements EventRepository {
     return result.rows.length > 0;
   }
 
-  async countSentLast24Hours(): Promise<number> {
+  async countSentToday(): Promise<number> {
     const result = await this.client.execute({
-      sql: "SELECT COUNT(*) AS total FROM email_events WHERE status = 'sent' AND sent_at >= datetime('now', '-24 hours')",
+      sql: "SELECT COUNT(*) AS total FROM email_events WHERE status = 'sent' AND date(sent_at) = date('now')",
     });
     const value = result.rows[0]?.total;
     if (typeof value === "number") return value;
@@ -65,7 +65,11 @@ export class LibsqlEventRepository implements EventRepository {
           queue_message_id,
           sent_at
         ) VALUES (
-          ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18
+          ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17,
+          CASE
+            WHEN ?11 = 'sent' THEN COALESCE(?18, strftime('%Y-%m-%d %H:%M:%f', 'now'))
+            ELSE NULL
+          END
         )
       `,
       args: [
@@ -91,4 +95,3 @@ export class LibsqlEventRepository implements EventRepository {
     });
   }
 }
-

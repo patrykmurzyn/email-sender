@@ -43,9 +43,6 @@ export function createResendClient(
             html: payload.html,
             text: payload.text,
             tags: payload.tags,
-            headers: payload.metadata
-              ? { "X-Email-Metadata": JSON.stringify(payload.metadata) }
-              : undefined,
           }),
         });
 
@@ -97,4 +94,3 @@ export function createResendClient(
     },
   };
 }
-

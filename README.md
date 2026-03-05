@@ -10,7 +10,7 @@ Cloudflare Queue consumer for reliable email delivery using:
 
 - Queue payload validation (`zod`)
 - Idempotency by `messageId` (`sent` uniqueness)
-- Rolling 24h soft limit (`DAILY_SOFT_LIMIT`, default `95`)
+- Daily limit (`DAILY_LIMIT`), default set in `wrangler.jsonc` to `95`; unset means no daily cap
 - Retry policy for temporary errors (`429`, `5xx`, network/timeouts)
 - Audit log for all attempts (`email_events`)
 - Metadata + content hash retention (without persisting full body content)
@@ -88,15 +88,15 @@ Required fields:
 
 - `messageId` (`string`, UUID): globally unique id for idempotency.
 - `from` (`string`): sender, e.g. `Acme <noreply@twojadomena.pl>`.
-- `to` (`string[]`): at least one recipient.
+- `to` (`string[]`): at least one valid email recipient.
 - `subject` (`string`): email subject, max 998 chars.
 - one of: `html` (`string`) or `text` (`string`): at least one body format is required.
 
 Optional fields:
 
-- `cc` (`string[]`)
-- `bcc` (`string[]`)
-- `replyTo` (`string`)
+- `cc` (`string[]`, valid emails)
+- `bcc` (`string[]`, valid emails)
+- `replyTo` (`string`, valid email)
 - `tags` (`{ name: string; value: string }[]`)
 - `metadata` (`Record<string, unknown>`) - business context (tenant/order/template etc.).
 
@@ -104,6 +104,8 @@ Rules:
 
 - `messageId` should never be reused for different emails.
 - `from` must belong to a verified Resend domain.
+- `from` must contain a valid email (plain or `Display Name <email@domain>` format).
+- `metadata` maximum serialized size is 8KB.
 - Unknown fields are rejected (`additionalProperties: false` behavior).
 
 ### Full payload example
@@ -132,7 +134,7 @@ For each message the consumer Worker:
 1. Validates payload schema.
 2. Writes `received` event to DB.
 3. Checks idempotency (`messageId` already `sent` -> `duplicate`, `ack`).
-4. Checks rolling 24h limit (`>= DAILY_SOFT_LIMIT` -> `rate_limited`, `retry`).
+4. Checks current UTC day limit (`>= DAILY_LIMIT` -> `rate_limited`, `retry`).
 5. Sends via Resend.
 6. Stores final event (`sent`, `retryable_error`, `permanent_error`, `invalid_payload`).
 7. Performs `ack()` or `retry()` based on error mapping.

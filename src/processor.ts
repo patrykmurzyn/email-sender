@@ -105,14 +105,14 @@ export async function processQueueMessage(
       return;
     }
 
-    const sentLast24h = await deps.repository.countSentLast24Hours();
-    if (sentLast24h >= deps.config.dailySoftLimit) {
+    const sentToday = await deps.repository.countSentToday();
+    if (deps.config.dailyLimit !== null && sentToday >= deps.config.dailyLimit) {
       await safeRecord(deps, {
         ...base,
         queueMessageId: message.id,
         status: "rate_limited",
         errorCode: "DAILY_LIMIT_REACHED",
-        errorMessage: `Daily soft limit ${deps.config.dailySoftLimit} reached`,
+        errorMessage: `Daily limit ${deps.config.dailyLimit} reached`,
       });
       message.retry({ delaySeconds: deps.config.rateLimitRetrySeconds });
       await deps.sleep(deps.config.rateLimitDelayMs);
@@ -134,14 +134,24 @@ export async function processQueueMessage(
   const delivery = await deps.deliveryClient.sendEmail(payload);
 
   if (delivery.ok) {
-    await safeRecord(deps, {
-      ...base,
-      queueMessageId: message.id,
-      status: "sent",
-      providerMessageId: delivery.providerMessageId,
-      sentAt: deps.nowIso(),
-    });
-    message.ack();
+    try {
+      await deps.repository.insertEvent({
+        ...base,
+        queueMessageId: message.id,
+        status: "sent",
+        providerMessageId: delivery.providerMessageId,
+      });
+      message.ack();
+    } catch (error) {
+      await safeRecord(deps, {
+        ...base,
+        queueMessageId: message.id,
+        status: "retryable_error",
+        errorCode: "DB_UNAVAILABLE_AFTER_SEND",
+        errorMessage: error instanceof Error ? error.message : "Unknown DB error after send",
+      });
+      message.retry({ delaySeconds: deps.config.retryNetworkSeconds });
+    }
     await deps.sleep(deps.config.rateLimitDelayMs);
     return;
   }
@@ -169,4 +179,3 @@ export async function processQueueMessage(
   message.ack();
   await deps.sleep(deps.config.rateLimitDelayMs);
 }
-
