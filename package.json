@@ -8,7 +8,8 @@
     "deploy": "wrangler deploy",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "queue:test": "node scripts/queue-smoke-test.mjs"
   },
   "dependencies": {
     "@libsql/client": "^0.15.15",
