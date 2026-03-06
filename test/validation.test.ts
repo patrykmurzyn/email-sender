@@ -47,4 +47,9 @@ describe("parsePayload", () => {
     });
     expect(parsed.ok).toBe(false);
   });
+
+  it("rejects stringified payloads", () => {
+    const parsed = parsePayload(JSON.stringify(validPayload));
+    expect(parsed.ok).toBe(false);
+  });
 });

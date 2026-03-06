@@ -51,17 +51,6 @@ const payloadSchema = z
     message: "At least one of html or text must be provided",
   });
 
-export function normalizeQueueBody(body: unknown): unknown {
-  if (typeof body === "string") {
-    try {
-      return JSON.parse(body) as unknown;
-    } catch {
-      return body;
-    }
-  }
-  return body;
-}
-
 export function parsePayload(body: unknown): {
   ok: true;
   payload: EmailQueueMessage;
@@ -69,8 +58,7 @@ export function parsePayload(body: unknown): {
   ok: false;
   error: string;
 } {
-  const normalized = normalizeQueueBody(body);
-  const parsed = payloadSchema.safeParse(normalized);
+  const parsed = payloadSchema.safeParse(body);
   if (!parsed.success) {
     return {
       ok: false,
