@@ -2,6 +2,13 @@
 
 Consumer Cloudflare Queue `emails` that sends emails through Resend and stores delivery audit events in Turso/libSQL.
 
+## Why This Project Exists
+
+Instead of implementing email sending separately in every project, each application only pushes an email payload to one queue (`emails`).
+
+This Worker is the single place that handles delivery, retries, idempotency, and logging.
+Many applications can use the same queue and the same Worker.
+
 ## Responsibilities
 
 - Validate queue message payload (`zod`).
