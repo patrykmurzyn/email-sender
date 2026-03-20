@@ -24,11 +24,10 @@ function assertSecret(name: keyof Env, value: string | undefined): string {
 }
 
 export function getConfig(env: Env): AppConfig {
-  assertSecret("RESEND_API_KEY", env.RESEND_API_KEY);
-  assertSecret("TURSO_DATABASE_URL", env.TURSO_DATABASE_URL);
-  assertSecret("TURSO_AUTH_TOKEN", env.TURSO_AUTH_TOKEN);
-
   return {
+    resendApiKey: env.RESEND_API_KEY ?? null,
+    tursoDatabaseUrl: assertSecret("TURSO_DATABASE_URL", env.TURSO_DATABASE_URL),
+    tursoAuthToken: assertSecret("TURSO_AUTH_TOKEN", env.TURSO_AUTH_TOKEN),
     dailyLimit: parseOptionalPositiveInt(env.DAILY_LIMIT),
     rateLimitDelayMs: parsePositiveInt(env.RATE_LIMIT_DELAY_MS, 1000),
     rateLimitRetrySeconds: parsePositiveInt(env.RATE_LIMIT_RETRY_SECONDS, 3600),

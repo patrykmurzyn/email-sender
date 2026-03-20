@@ -27,65 +27,23 @@ export class LibsqlEventRepository implements EventRepository {
     messageId: string,
     limit: number | null,
   ): Promise<"duplicate" | "rate_limited" | "ok"> {
-    const startTime = Date.now();
-    const maxRetries = 3;
-    const baseDelayMs = 50;
+    const existingResult = await this.client.execute({
+      sql: "SELECT 1 FROM email_events WHERE message_id = ?1 AND status IN ('sent', 'sending') LIMIT 1",
+      args: [messageId],
+    });
 
-    for (let attempt = 0; attempt < maxRetries; attempt++) {
-      try {
-        const tx = this.client.executeMultiple(`
-          BEGIN IMMEDIATE;
-        `);
+    if (existingResult.rows.length > 0) {
+      return "duplicate";
+    }
 
-        await tx;
+    if (limit !== null) {
+      const countResult = await this.client.execute({
+        sql: "SELECT COUNT(*) AS total FROM email_events WHERE status = 'sent' AND date(sent_at) = date('now')",
+      });
+      const count = Number(countResult.rows[0]?.total ?? 0);
 
-        const existingResult = await this.client.execute({
-          sql: "SELECT 1 FROM email_events WHERE message_id = ?1 AND status = 'sent' LIMIT 1",
-          args: [messageId],
-        });
-
-        if (existingResult.rows.length > 0) {
-          await this.client.execute("ROLLBACK");
-          return "duplicate";
-        }
-
-        const sendingResult = await this.client.execute({
-          sql: "SELECT 1 FROM email_events WHERE message_id = ?1 AND status = 'sending' LIMIT 1",
-          args: [messageId],
-        });
-
-        if (sendingResult.rows.length > 0) {
-          await this.client.execute("ROLLBACK");
-          return "duplicate";
-        }
-
-        if (limit !== null) {
-          const countResult = await this.client.execute({
-            sql: "SELECT COUNT(*) AS total FROM email_events WHERE status = 'sent' AND date(sent_at) = date('now')",
-          });
-          const count = Number(countResult.rows[0]?.total ?? 0);
-
-          if (count >= limit) {
-            await this.client.execute("ROLLBACK");
-            return "rate_limited";
-          }
-        }
-
-        await this.client.execute("COMMIT");
-        return "ok";
-      } catch (error) {
-        try {
-          await this.client.execute("ROLLBACK");
-        } catch {
-          // ignore rollback errors
-        }
-
-        if (attempt < maxRetries - 1) {
-          const delay = baseDelayMs * Math.pow(2, attempt);
-          await new Promise((resolve) => setTimeout(resolve, delay));
-        } else {
-          throw error;
-        }
+      if (count >= limit) {
+        return "rate_limited";
       }
     }
 
@@ -142,7 +100,7 @@ export class LibsqlEventRepository implements EventRepository {
   }
 
   async markAsSent(providerMessageId: string, queueMessageId: string): Promise<void> {
-    await this.client.execute({
+    const result = await this.client.execute({
       sql: `
         UPDATE email_events 
         SET status = 'sent', 
@@ -152,6 +110,10 @@ export class LibsqlEventRepository implements EventRepository {
       `,
       args: [providerMessageId, queueMessageId],
     });
+
+    if (result.rowsAffected === 0) {
+      throw new Error(`No sending event found for queue_message_id: ${queueMessageId}`);
+    }
   }
 
   async markAsFailed(

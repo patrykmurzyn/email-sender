@@ -13,7 +13,7 @@ export default {
   async queue(batch: MessageBatch<unknown>, env: Env): Promise<void> {
     const config = getConfig(env);
     const repository = new LibsqlEventRepository(env);
-    const deliveryClient = createResendClient(env.RESEND_API_KEY, config);
+    const deliveryClient = createResendClient(env.RESEND_API_KEY ?? null, config);
 
     for (const message of batch.messages) {
       await processQueueMessage(message, {

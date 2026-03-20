@@ -15,12 +15,21 @@ interface SendResponseBody {
 }
 
 export function createResendClient(
-  apiKey: string,
+  apiKey: string | null,
   config: AppConfig,
   fetchFn: typeof fetch = fetch,
 ): DeliveryClient {
   return {
     async sendEmail(payload: EmailQueueMessage): Promise<DeliveryResult> {
+      if (!apiKey) {
+        return {
+          ok: false,
+          retryable: false,
+          errorCode: "MISSING_API_KEY",
+          errorMessage: "RESEND_API_KEY is not configured",
+        };
+      }
+
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), config.resendTimeoutMs);
 
@@ -46,11 +55,11 @@ export function createResendClient(
           }),
         });
 
-        const body = (await response.json().catch(() => ({}))) as SendResponseBody;
+        const body = (await response.json().catch(() => ({}))) as { id?: string; error?: { message?: string } };
         const providerError = body.error?.message || `Resend HTTP ${response.status}`;
 
-        if ((response.status === 200 || response.status === 201) && body.data?.id) {
-          return { ok: true, providerMessageId: body.data.id };
+        if ((response.status === 200 || response.status === 201) && body.id) {
+          return { ok: true, providerMessageId: body.id };
         }
 
         if (response.status === 429) {

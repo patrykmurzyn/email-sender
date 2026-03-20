@@ -29,7 +29,7 @@ export interface EmailQueueMessage {
 }
 
 export interface Env {
-  RESEND_API_KEY: string;
+  RESEND_API_KEY?: string;
   TURSO_DATABASE_URL: string;
   TURSO_AUTH_TOKEN: string;
   DAILY_LIMIT?: string;
@@ -43,6 +43,9 @@ export interface Env {
 }
 
 export interface AppConfig {
+  resendApiKey: string | null;
+  tursoDatabaseUrl: string;
+  tursoAuthToken: string;
   dailyLimit: number | null;
   rateLimitDelayMs: number;
   rateLimitRetrySeconds: number;

@@ -3,6 +3,9 @@ import { processQueueMessage } from "../src/processor";
 import type { AppConfig, DeliveryClient, EventRepository } from "../src/types";
 
 const config: AppConfig = {
+  resendApiKey: null,
+  tursoDatabaseUrl: "libsql://test",
+  tursoAuthToken: "test-token",
   dailyLimit: 95,
   rateLimitDelayMs: 0,
   rateLimitRetrySeconds: 3600,
