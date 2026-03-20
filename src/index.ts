@@ -23,6 +23,7 @@ export default {
         hashContent: hashPayloadContent,
         sleep,
         logger: console,
+        makeQueueMessageId: () => crypto.randomUUID(),
       });
     }
   },

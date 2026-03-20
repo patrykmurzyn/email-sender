@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { processQueueMessage } from "../src/processor";
-import type { AppConfig, DeliveryClient, EventInsert, EventRepository } from "../src/types";
+import type { AppConfig, DeliveryClient, EventRepository } from "../src/types";
 
 const config: AppConfig = {
   dailyLimit: 95,
@@ -30,14 +30,22 @@ function message(body: unknown) {
   };
 }
 
-function deps(overrides: Partial<{ sent: boolean; sent24h: number; delivery: DeliveryClient["sendEmail"] }> = {}) {
-  const events: EventInsert[] = [];
+function deps(
+  overrides: Partial<{
+    reservation: "duplicate" | "rate_limited" | "ok";
+    insertSendingError: boolean;
+    delivery: DeliveryClient["sendEmail"];
+  }> = {},
+) {
   const repository: EventRepository = {
-    hasSentMessage: vi.fn(async () => overrides.sent ?? false),
-    countSentToday: vi.fn(async () => overrides.sent24h ?? 0),
-    insertEvent: vi.fn(async (event) => {
-      events.push(event);
+    checkAndReserve: vi.fn(async () => overrides.reservation ?? "ok"),
+    insertSendingEvent: vi.fn(async () => {
+      if (overrides.insertSendingError) {
+        throw new Error("DB insert failed");
+      }
     }),
+    markAsSent: vi.fn(async () => {}),
+    markAsFailed: vi.fn(async () => {}),
   };
 
   const deliveryClient: DeliveryClient = {
@@ -50,7 +58,6 @@ function deps(overrides: Partial<{ sent: boolean; sent24h: number; delivery: Del
   };
 
   return {
-    events,
     repository,
     deliveryClient,
   };
@@ -59,38 +66,38 @@ function deps(overrides: Partial<{ sent: boolean; sent24h: number; delivery: Del
 describe("processQueueMessage", () => {
   it("acks duplicate message_id", async () => {
     const msg = message(basePayload);
-    const testDeps = deps({ sent: true });
+    const testDeps = deps({ reservation: "duplicate" });
 
     await processQueueMessage(msg, {
       config,
       repository: testDeps.repository,
       deliveryClient: testDeps.deliveryClient,
       hashContent: async () => ({ hash: "abc", size: 1 }),
-      sleep: async () => undefined,
+      sleep: async () => {},
       logger: console,
+      makeQueueMessageId: () => "q-1",
     });
 
     expect(msg.ack).toHaveBeenCalledOnce();
     expect(msg.retry).not.toHaveBeenCalled();
-    expect(testDeps.events.some((event) => event.status === "duplicate")).toBe(true);
   });
 
   it("retries when daily limit is reached", async () => {
     const msg = message(basePayload);
-    const testDeps = deps({ sent24h: 95 });
+    const testDeps = deps({ reservation: "rate_limited" });
 
     await processQueueMessage(msg, {
       config,
       repository: testDeps.repository,
       deliveryClient: testDeps.deliveryClient,
       hashContent: async () => ({ hash: "abc", size: 1 }),
-      sleep: async () => undefined,
+      sleep: async () => {},
       logger: console,
+      makeQueueMessageId: () => "q-1",
     });
 
     expect(msg.ack).not.toHaveBeenCalled();
     expect(msg.retry).toHaveBeenCalledWith({ delaySeconds: 3600 });
-    expect(testDeps.events.some((event) => event.status === "rate_limited")).toBe(true);
   });
 
   it("retries for retryable provider errors", async () => {
@@ -110,16 +117,21 @@ describe("processQueueMessage", () => {
       repository: testDeps.repository,
       deliveryClient: testDeps.deliveryClient,
       hashContent: async () => ({ hash: "abc", size: 1 }),
-      sleep: async () => undefined,
+      sleep: async () => {},
       logger: console,
+      makeQueueMessageId: () => "q-1",
     });
 
     expect(msg.ack).not.toHaveBeenCalled();
     expect(msg.retry).toHaveBeenCalledWith({ delaySeconds: 120 });
-    expect(testDeps.events.some((event) => event.status === "retryable_error")).toBe(true);
+    expect(testDeps.repository.markAsFailed).toHaveBeenCalledWith(
+      "q-1",
+      "RESEND_429",
+      "Rate limit",
+    );
   });
 
-  it("acks invalid payload", async () => {
+  it("acks invalid payload without calling repository", async () => {
     const msg = message({ invalid: true });
     const testDeps = deps();
 
@@ -128,26 +140,103 @@ describe("processQueueMessage", () => {
       repository: testDeps.repository,
       deliveryClient: testDeps.deliveryClient,
       hashContent: async () => ({ hash: "abc", size: 1 }),
-      sleep: async () => undefined,
+      sleep: async () => {},
       logger: console,
+      makeQueueMessageId: () => "q-1",
     });
 
     expect(msg.ack).toHaveBeenCalledOnce();
     expect(msg.retry).not.toHaveBeenCalled();
-    expect(testDeps.events.some((event) => event.status === "invalid_payload")).toBe(true);
+    expect(testDeps.repository.checkAndReserve).not.toHaveBeenCalled();
   });
 
-  it("retries when provider send succeeds but sent event cannot be persisted", async () => {
+  it("retries when reservation check fails", async () => {
     const msg = message(basePayload);
     const testDeps = deps();
-    const insertEventMock = testDeps.repository.insertEvent as ReturnType<typeof vi.fn>;
-    let callIndex = 0;
-    insertEventMock.mockImplementation(async (event: EventInsert) => {
-      callIndex += 1;
-      if (event.status === "sent" && callIndex >= 2) {
-        throw new Error("DB write failed");
-      }
-      testDeps.events.push(event);
+    (testDeps.repository.checkAndReserve as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+      new Error("DB unavailable"),
+    );
+
+    await processQueueMessage(msg, {
+      config,
+      repository: testDeps.repository,
+      deliveryClient: testDeps.deliveryClient,
+      hashContent: async () => ({ hash: "abc", size: 1 }),
+      sleep: async () => {},
+      logger: console,
+      makeQueueMessageId: () => "q-1",
+    });
+
+    expect(msg.ack).not.toHaveBeenCalled();
+    expect(msg.retry).toHaveBeenCalledWith({ delaySeconds: 60 });
+  });
+
+  it("retries when insert sending event fails", async () => {
+    const msg = message(basePayload);
+    const testDeps = deps({ insertSendingError: true });
+
+    await processQueueMessage(msg, {
+      config,
+      repository: testDeps.repository,
+      deliveryClient: testDeps.deliveryClient,
+      hashContent: async () => ({ hash: "abc", size: 1 }),
+      sleep: async () => {},
+      logger: console,
+      makeQueueMessageId: () => "q-1",
+    });
+
+    expect(msg.ack).not.toHaveBeenCalled();
+    expect(msg.retry).toHaveBeenCalledWith({ delaySeconds: 60 });
+  });
+
+  it("marks as sent on successful delivery", async () => {
+    const msg = message(basePayload);
+    const testDeps = deps();
+
+    await processQueueMessage(msg, {
+      config,
+      repository: testDeps.repository,
+      deliveryClient: testDeps.deliveryClient,
+      hashContent: async () => ({ hash: "abc", size: 1 }),
+      sleep: async () => {},
+      logger: console,
+      makeQueueMessageId: () => "q-1",
+    });
+
+    expect(msg.ack).toHaveBeenCalledOnce();
+    expect(testDeps.repository.markAsSent).toHaveBeenCalledWith("res_123", "q-1");
+  });
+
+  it("retries when markAsSent fails after successful delivery", async () => {
+    const msg = message(basePayload);
+    const testDeps = deps();
+    (testDeps.repository.markAsSent as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+      new Error("DB write failed"),
+    );
+
+    await processQueueMessage(msg, {
+      config,
+      repository: testDeps.repository,
+      deliveryClient: testDeps.deliveryClient,
+      hashContent: async () => ({ hash: "abc", size: 1 }),
+      sleep: async () => {},
+      logger: console,
+      makeQueueMessageId: () => "q-1",
+    });
+
+    expect(msg.ack).not.toHaveBeenCalled();
+    expect(msg.retry).toHaveBeenCalledWith({ delaySeconds: 60 });
+  });
+
+  it("acks permanent errors without retry", async () => {
+    const msg = message(basePayload);
+    const testDeps = deps({
+      delivery: vi.fn(async () => ({
+        ok: false as const,
+        retryable: false,
+        errorCode: "RESEND_VALIDATION_ERROR",
+        errorMessage: "Invalid email format",
+      })),
     });
 
     await processQueueMessage(msg, {
@@ -155,11 +244,13 @@ describe("processQueueMessage", () => {
       repository: testDeps.repository,
       deliveryClient: testDeps.deliveryClient,
       hashContent: async () => ({ hash: "abc", size: 1 }),
-      sleep: async () => undefined,
+      sleep: async () => {},
       logger: console,
+      makeQueueMessageId: () => "q-1",
     });
 
-    expect(msg.ack).not.toHaveBeenCalled();
-    expect(msg.retry).toHaveBeenCalledWith({ delaySeconds: 60 });
+    expect(msg.ack).toHaveBeenCalledOnce();
+    expect(msg.retry).not.toHaveBeenCalled();
+    expect(testDeps.repository.markAsFailed).toHaveBeenCalled();
   });
 });

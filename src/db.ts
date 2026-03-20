@@ -23,26 +23,76 @@ export class LibsqlEventRepository implements EventRepository {
       });
   }
 
-  async hasSentMessage(messageId: string): Promise<boolean> {
-    const result = await this.client.execute({
-      sql: "SELECT 1 AS found FROM email_events WHERE message_id = ?1 AND status = 'sent' LIMIT 1",
-      args: [messageId],
-    });
-    return result.rows.length > 0;
+  async checkAndReserve(
+    messageId: string,
+    limit: number | null,
+  ): Promise<"duplicate" | "rate_limited" | "ok"> {
+    const startTime = Date.now();
+    const maxRetries = 3;
+    const baseDelayMs = 50;
+
+    for (let attempt = 0; attempt < maxRetries; attempt++) {
+      try {
+        const tx = this.client.executeMultiple(`
+          BEGIN IMMEDIATE;
+        `);
+
+        await tx;
+
+        const existingResult = await this.client.execute({
+          sql: "SELECT 1 FROM email_events WHERE message_id = ?1 AND status = 'sent' LIMIT 1",
+          args: [messageId],
+        });
+
+        if (existingResult.rows.length > 0) {
+          await this.client.execute("ROLLBACK");
+          return "duplicate";
+        }
+
+        const sendingResult = await this.client.execute({
+          sql: "SELECT 1 FROM email_events WHERE message_id = ?1 AND status = 'sending' LIMIT 1",
+          args: [messageId],
+        });
+
+        if (sendingResult.rows.length > 0) {
+          await this.client.execute("ROLLBACK");
+          return "duplicate";
+        }
+
+        if (limit !== null) {
+          const countResult = await this.client.execute({
+            sql: "SELECT COUNT(*) AS total FROM email_events WHERE status = 'sent' AND date(sent_at) = date('now')",
+          });
+          const count = Number(countResult.rows[0]?.total ?? 0);
+
+          if (count >= limit) {
+            await this.client.execute("ROLLBACK");
+            return "rate_limited";
+          }
+        }
+
+        await this.client.execute("COMMIT");
+        return "ok";
+      } catch (error) {
+        try {
+          await this.client.execute("ROLLBACK");
+        } catch {
+          // ignore rollback errors
+        }
+
+        if (attempt < maxRetries - 1) {
+          const delay = baseDelayMs * Math.pow(2, attempt);
+          await new Promise((resolve) => setTimeout(resolve, delay));
+        } else {
+          throw error;
+        }
+      }
+    }
+
+    return "ok";
   }
 
-  async countSentToday(): Promise<number> {
-    const result = await this.client.execute({
-      sql: "SELECT COUNT(*) AS total FROM email_events WHERE status = 'sent' AND date(sent_at) = date('now')",
-    });
-    const value = result.rows[0]?.total;
-    if (typeof value === "number") return value;
-    if (typeof value === "bigint") return Number(value);
-    if (typeof value === "string") return Number.parseInt(value, 10);
-    return 0;
-  }
-
-  async insertEvent(event: EventInsert): Promise<void> {
+  async insertSendingEvent(event: EventInsert): Promise<void> {
     await this.client.execute({
       sql: `
         INSERT INTO email_events (
@@ -65,11 +115,7 @@ export class LibsqlEventRepository implements EventRepository {
           queue_message_id,
           sent_at
         ) VALUES (
-          ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17,
-          CASE
-            WHEN ?11 = 'sent' THEN COALESCE(?18, strftime('%Y-%m-%d %H:%M:%f', 'now'))
-            ELSE NULL
-          END
+          ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18
         )
       `,
       args: [
@@ -83,15 +129,45 @@ export class LibsqlEventRepository implements EventRepository {
         event.subject ?? null,
         event.contentHash ?? null,
         event.contentSize ?? null,
-        event.status,
+        "sending",
         event.provider ?? "resend",
-        event.providerMessageId ?? null,
-        event.errorCode ?? null,
-        normalizeMessage(event.errorMessage),
+        null,
+        null,
+        null,
         toJson(event.metadata),
         event.queueMessageId,
-        event.sentAt ?? null,
+        null,
       ],
+    });
+  }
+
+  async markAsSent(providerMessageId: string, queueMessageId: string): Promise<void> {
+    await this.client.execute({
+      sql: `
+        UPDATE email_events 
+        SET status = 'sent', 
+            provider_message_id = ?1,
+            sent_at = strftime('%Y-%m-%d %H:%M:%f', 'now')
+        WHERE queue_message_id = ?2 AND status = 'sending'
+      `,
+      args: [providerMessageId, queueMessageId],
+    });
+  }
+
+  async markAsFailed(
+    queueMessageId: string,
+    errorCode: string,
+    errorMessage: string,
+  ): Promise<void> {
+    await this.client.execute({
+      sql: `
+        UPDATE email_events 
+        SET status = 'retryable_error',
+            error_code = ?1,
+            error_message = ?2
+        WHERE queue_message_id = ?3 AND status = 'sending'
+      `,
+      args: [errorCode, normalizeMessage(errorMessage), queueMessageId],
     });
   }
 }

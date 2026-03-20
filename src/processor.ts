@@ -8,57 +8,12 @@ interface QueueMessageLike {
   retry: (options?: { delaySeconds?: number }) => void;
 }
 
-function safeRecord(
-  deps: ProcessorDeps,
-  event: {
-    messageId: string;
-    queueMessageId: string;
-    status:
-      | "received"
-      | "duplicate"
-      | "rate_limited"
-      | "sent"
-      | "retryable_error"
-      | "permanent_error"
-      | "invalid_payload";
-    fromEmail?: string;
-    toEmails?: string[];
-    ccEmails?: string[];
-    bccEmails?: string[];
-    replyTo?: string;
-    subject?: string;
-    metadata?: Record<string, unknown>;
-    contentHash?: string;
-    contentSize?: number;
-    providerMessageId?: string;
-    errorCode?: string;
-    errorMessage?: string;
-    sentAt?: string;
-  },
-): Promise<void> {
-  return deps.repository.insertEvent(event).catch((error) => {
-    deps.logger.error("Failed to persist email event", {
-      messageId: event.messageId,
-      status: event.status,
-      queueMessageId: event.queueMessageId,
-      error: error instanceof Error ? error.message : "Unknown DB error",
-    });
-  });
-}
-
-function eventBase(payload: EmailQueueMessage, content: { hash: string; size: number }) {
-  return {
-    messageId: payload.messageId,
-    fromEmail: payload.from,
-    toEmails: payload.to,
-    ccEmails: payload.cc,
-    bccEmails: payload.bcc,
-    replyTo: payload.replyTo,
-    subject: payload.subject,
-    metadata: payload.metadata,
-    contentHash: content.hash,
-    contentSize: content.size,
-  };
+function logError(
+  logger: ProcessorDeps["logger"],
+  message: string,
+  context: Record<string, unknown>,
+): void {
+  logger.error(message, context);
 }
 
 export async function processQueueMessage(
@@ -68,66 +23,67 @@ export async function processQueueMessage(
   const parsedPayload = parsePayload(message.body);
 
   if (!parsedPayload.ok) {
-    await safeRecord(deps, {
-      messageId: `invalid:${message.id}`,
-      queueMessageId: message.id,
-      status: "invalid_payload",
-      errorCode: "INVALID_PAYLOAD",
-      errorMessage: parsedPayload.error,
-    });
-    message.ack();
     await deps.sleep(deps.config.rateLimitDelayMs);
+    message.ack();
     return;
   }
 
   const payload = parsedPayload.payload;
   const content = await deps.hashContent(payload);
-  const base = eventBase(payload, content);
+  const queueMessageId = deps.makeQueueMessageId();
 
-  await safeRecord(deps, {
-    ...base,
-    queueMessageId: message.id,
-    status: "received",
-  });
+  let reservationResult: "duplicate" | "rate_limited" | "ok";
+  try {
+    reservationResult = await deps.repository.checkAndReserve(
+      payload.messageId,
+      deps.config.dailyLimit,
+    );
+  } catch (error) {
+    logError(deps.logger, "Failed to check reservation", {
+      messageId: payload.messageId,
+      queueMessageId,
+      error: error instanceof Error ? error.message : "Unknown error",
+    });
+    await deps.sleep(deps.config.retryNetworkSeconds);
+    message.retry({ delaySeconds: deps.config.retryNetworkSeconds });
+    return;
+  }
+
+  if (reservationResult === "duplicate") {
+    await deps.sleep(deps.config.rateLimitDelayMs);
+    message.ack();
+    return;
+  }
+
+  if (reservationResult === "rate_limited") {
+    await deps.sleep(deps.config.rateLimitDelayMs);
+    message.retry({ delaySeconds: deps.config.rateLimitRetrySeconds });
+    return;
+  }
 
   try {
-    const alreadySent = await deps.repository.hasSentMessage(payload.messageId);
-    if (alreadySent) {
-      await safeRecord(deps, {
-        ...base,
-        queueMessageId: message.id,
-        status: "duplicate",
-        errorCode: "DUPLICATE_MESSAGE",
-        errorMessage: "Message already marked as sent",
-      });
-      message.ack();
-      await deps.sleep(deps.config.rateLimitDelayMs);
-      return;
-    }
-
-    const sentToday = await deps.repository.countSentToday();
-    if (deps.config.dailyLimit !== null && sentToday >= deps.config.dailyLimit) {
-      await safeRecord(deps, {
-        ...base,
-        queueMessageId: message.id,
-        status: "rate_limited",
-        errorCode: "DAILY_LIMIT_REACHED",
-        errorMessage: `Daily limit ${deps.config.dailyLimit} reached`,
-      });
-      message.retry({ delaySeconds: deps.config.rateLimitRetrySeconds });
-      await deps.sleep(deps.config.rateLimitDelayMs);
-      return;
-    }
-  } catch (error) {
-    await safeRecord(deps, {
-      ...base,
-      queueMessageId: message.id,
-      status: "retryable_error",
-      errorCode: "DB_UNAVAILABLE",
-      errorMessage: error instanceof Error ? error.message : "Unknown DB error",
+    await deps.repository.insertSendingEvent({
+      messageId: payload.messageId,
+      queueMessageId,
+      status: "sending",
+      fromEmail: payload.from,
+      toEmails: payload.to,
+      ccEmails: payload.cc,
+      bccEmails: payload.bcc,
+      replyTo: payload.replyTo,
+      subject: payload.subject,
+      metadata: payload.metadata,
+      contentHash: content.hash,
+      contentSize: content.size,
     });
+  } catch (error) {
+    logError(deps.logger, "Failed to insert sending event", {
+      messageId: payload.messageId,
+      queueMessageId,
+      error: error instanceof Error ? error.message : "Unknown error",
+    });
+    await deps.sleep(deps.config.retryNetworkSeconds);
     message.retry({ delaySeconds: deps.config.retryNetworkSeconds });
-    await deps.sleep(deps.config.rateLimitDelayMs);
     return;
   }
 
@@ -135,20 +91,14 @@ export async function processQueueMessage(
 
   if (delivery.ok) {
     try {
-      await deps.repository.insertEvent({
-        ...base,
-        queueMessageId: message.id,
-        status: "sent",
-        providerMessageId: delivery.providerMessageId,
-      });
+      await deps.repository.markAsSent(delivery.providerMessageId, queueMessageId);
       message.ack();
     } catch (error) {
-      await safeRecord(deps, {
-        ...base,
-        queueMessageId: message.id,
-        status: "retryable_error",
-        errorCode: "DB_UNAVAILABLE_AFTER_SEND",
-        errorMessage: error instanceof Error ? error.message : "Unknown DB error after send",
+      logError(deps.logger, "Failed to mark as sent after successful delivery", {
+        messageId: payload.messageId,
+        queueMessageId,
+        providerMessageId: delivery.providerMessageId,
+        error: error instanceof Error ? error.message : "Unknown error",
       });
       message.retry({ delaySeconds: deps.config.retryNetworkSeconds });
     }
@@ -157,25 +107,37 @@ export async function processQueueMessage(
   }
 
   if (delivery.retryable) {
-    await safeRecord(deps, {
-      ...base,
-      queueMessageId: message.id,
-      status: "retryable_error",
-      errorCode: delivery.errorCode,
-      errorMessage: delivery.errorMessage,
-    });
-    message.retry({ delaySeconds: delivery.retryDelaySeconds ?? deps.config.retryNetworkSeconds });
+    try {
+      await deps.repository.markAsFailed(
+        queueMessageId,
+        delivery.errorCode,
+        delivery.errorMessage,
+      );
+    } catch (error) {
+      logError(deps.logger, "Failed to mark as failed", {
+        messageId: payload.messageId,
+        queueMessageId,
+        error: error instanceof Error ? error.message : "Unknown error",
+      });
+    }
     await deps.sleep(deps.config.rateLimitDelayMs);
+    message.retry({ delaySeconds: delivery.retryDelaySeconds ?? deps.config.retryNetworkSeconds });
     return;
   }
 
-  await safeRecord(deps, {
-    ...base,
-    queueMessageId: message.id,
-    status: "permanent_error",
-    errorCode: delivery.errorCode,
-    errorMessage: delivery.errorMessage,
-  });
-  message.ack();
+  try {
+    await deps.repository.markAsFailed(
+      queueMessageId,
+      delivery.errorCode,
+      delivery.errorMessage,
+    );
+  } catch (error) {
+    logError(deps.logger, "Failed to mark as failed", {
+      messageId: payload.messageId,
+      queueMessageId,
+      error: error instanceof Error ? error.message : "Unknown error",
+    });
+  }
   await deps.sleep(deps.config.rateLimitDelayMs);
+  message.ack();
 }

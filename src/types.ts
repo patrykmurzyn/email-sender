@@ -1,7 +1,7 @@
 import type { Client } from "@libsql/client";
 
 export type EmailEventStatus =
-  | "received"
+  | "sending"
   | "duplicate"
   | "rate_limited"
   | "sent"
@@ -74,9 +74,13 @@ export interface EventInsert {
 }
 
 export interface EventRepository {
-  hasSentMessage(messageId: string): Promise<boolean>;
-  countSentToday(): Promise<number>;
-  insertEvent(event: EventInsert): Promise<void>;
+  checkAndReserve(
+    messageId: string,
+    limit: number | null,
+  ): Promise<"duplicate" | "rate_limited" | "ok">;
+  insertSendingEvent(event: EventInsert): Promise<void>;
+  markAsSent(providerMessageId: string, queueMessageId: string): Promise<void>;
+  markAsFailed(queueMessageId: string, errorCode: string, errorMessage: string): Promise<void>;
 }
 
 export type DeliveryResult =
@@ -100,6 +104,7 @@ export interface ProcessorDeps {
   sleep: (ms: number) => Promise<void>;
   hashContent: (payload: EmailQueueMessage) => Promise<{ hash: string; size: number }>;
   logger: Pick<Console, "error" | "info" | "warn">;
+  makeQueueMessageId: () => string;
 }
 
 export interface LibsqlEnv {

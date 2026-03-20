@@ -9,7 +9,8 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "queue:test": "node scripts/queue-smoke-test.mjs"
+    "queue:test": "node scripts/queue-smoke-test.mjs",
+    "migrate": "node scripts/run-migrations.mjs"
   },
   "dependencies": {
     "@libsql/client": "^0.15.15",
